@@ -2,9 +2,10 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import requests
+from sklearn.cluster import KMeans
 from urllib.parse import quote
 
-st.title("Smart Job Router (Stable Version)")
+st.title("Smart Job Router (Tight Geographic Clusters)")
 
 uploaded_file = st.file_uploader("Upload Jobs Excel")
 
@@ -13,10 +14,10 @@ MAX_JOBS = 5
 
 
 # ---------------- POSTCODE ----------------
-def extract_postcode(text):
-    if pd.isna(text):
+def extract_postcode(x):
+    if pd.isna(x):
         return None
-    return str(text).split(",")[-1].strip().upper()
+    return str(x).split(",")[-1].strip().upper()
 
 
 # ---------------- GEOCODE ----------------
@@ -31,12 +32,7 @@ def geocode(pc):
         return None, None
 
 
-# ---------------- DISTANCE ----------------
-def dist(a, b):
-    return (a[0]-b[0])**2 + (a[1]-b[1])**2
-
-
-# ---------------- ROUTE ORDER ----------------
+# ---------------- ROUTE ----------------
 def route(df):
     if len(df) <= 1:
         return df
@@ -48,11 +44,11 @@ def route(df):
     out.append(current)
     remaining = remaining.drop(current.name)
 
-    while len(remaining) > 0:
+    while len(remaining):
         cp = (current["lat"], current["lon"])
 
         remaining["d"] = remaining.apply(
-            lambda r: dist(cp, (r["lat"], r["lon"])),
+            lambda r: (r["lat"] - cp[0])**2 + (r["lon"] - cp[1])**2,
             axis=1
         )
 
@@ -77,11 +73,6 @@ if uploaded_file:
 
     address_col = next((c for c in df.columns if "address" in c.lower()), None)
 
-    if not address_col:
-        st.error("No address column found")
-        st.stop()
-
-    # ---------------- POSTCODES ----------------
     df["postcode"] = df[address_col].apply(extract_postcode)
 
     lat, lon = [], []
@@ -99,44 +90,52 @@ if uploaded_file:
     st.write(f"Valid jobs: {len(df)}")
 
     # =====================================================
-    # 🧠 CORE LOGIC: NEAREST ENGINEER + CAPACITY LIMIT
+    # 🧭 STEP 1: STRONG GEOGRAPHIC CLUSTERING
     # =====================================================
 
-    df["Engineer"] = -1
-    counts = {i: 0 for i in range(ENGINEERS)}
+    n_clusters = ENGINEERS * MAX_JOBS
 
-    # seed engineers with first points (spread start)
-    seeds = df.sample(min(ENGINEERS, len(df)), random_state=1)
-    centers = list(zip(seeds["lat"], seeds["lon"]))
+    kmeans = KMeans(n_clusters=n_clusters, random_state=42, n_init="auto")
+    df["cluster"] = kmeans.fit_predict(df[["lat", "lon"]])
 
-    if len(centers) < ENGINEERS:
-        centers += centers[:ENGINEERS - len(centers)]
+    # sort clusters by location density
+    cluster_sizes = df["cluster"].value_counts()
 
-    for i, row in df.iterrows():
+    # =====================================================
+    # 🧠 STEP 2: ASSIGN CLUSTERS INTO ENGINEERS
+    # =====================================================
 
-        point = (row["lat"], row["lon"])
+    engineer_jobs = {i: [] for i in range(ENGINEERS)}
+    engineer_counts = {i: 0 for i in range(ENGINEERS)}
 
-        best = None
-        best_score = 1e9
+    for cluster in cluster_sizes.index:
 
-        for e in range(ENGINEERS):
+        cluster_df = df[df["cluster"] == cluster]
 
-            if counts[e] >= MAX_JOBS:
-                continue
+        for _, row in cluster_df.iterrows():
 
-            score = dist(point, centers[e]) + counts[e] * 0.1
+            best = min(engineer_counts, key=engineer_counts.get)
 
-            if score < best_score:
-                best_score = score
-                best = e
+            if engineer_counts[best] < MAX_JOBS:
+                engineer_jobs[best].append(row)
+                engineer_counts[best] += 1
 
-        if best is None:
-            best = min(counts, key=counts.get)
+    # build final dataframe
+    final = []
 
-        df.at[i, "Engineer"] = best
-        counts[best] += 1
+    for e, rows in engineer_jobs.items():
+        for r in rows:
+            final.append({
+                address_col: r[address_col],
+                "postcode": r["postcode"],
+                "lat": r["lat"],
+                "lon": r["lon"],
+                "Engineer": e
+            })
 
-    st.success("Routing complete")
+    df = pd.DataFrame(final)
+
+    st.success("Tight geographic routing complete")
 
     # =====================================================
     # OUTPUT
@@ -150,14 +149,9 @@ if uploaded_file:
 
         eng = route(eng)
 
-        cols = [address_col, "postcode"]
-        if "Slot" in eng.columns:
-            cols.append("Slot")
-        cols += ["lat", "lon"]
+        st.dataframe(eng)
 
-        st.dataframe(eng[cols])
-
-        if len(eng) > 0:
+        if len(eng):
             st.markdown(
                 f"[Open Route]({map_link(eng[address_col].tolist())})"
             )
