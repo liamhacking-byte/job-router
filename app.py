@@ -1,69 +1,46 @@
 import streamlit as st
 import pandas as pd
-import requests
 import numpy as np
+import requests
 import re
 from sklearn.cluster import KMeans
 from urllib.parse import quote
-import time
 
-st.title("Smart Job Router (Pro - UK Postcode Aware)")
+st.title("Smart Job Router (UK Reliable Version)")
 
 uploaded_file = st.file_uploader("Upload Jobs Excel")
 engineers = st.number_input("Number of engineers", min_value=1, value=4)
 
 
-# ---------------- UK POSTCODE EXTRACT ----------------
+# ---------------- POSTCODE EXTRACTION (LAST COMMA) ----------------
 def extract_postcode(text):
     if pd.isna(text):
         return None
 
-    text = str(text).upper()
+    parts = [p.strip() for p in str(text).split(",") if p.strip()]
 
-    # UK postcode pattern
-    match = re.search(r'[A-Z]{1,2}\d[A-Z\d]?\s?\d[A-Z]{2}', text)
-    return match.group(0) if match else None
+    if not parts:
+        return None
+
+    return parts[-1].upper()
 
 
-# ---------------- GEOCODING ----------------
+# ---------------- UK GEOCODING (POSTCODES.IO) ----------------
 @st.cache_data
 def geocode_postcode(postcode):
     if not postcode:
         return None, None
 
-    url = "https://nominatim.openstreetmap.org/search"
-    params = {
-        "format": "json",
-        "q": postcode,
-        "countrycodes": "gb"
-    }
-
-    headers = {"User-Agent": "smart-job-router"}
-
     try:
-        r = requests.get(url, params=params, headers=headers, timeout=10).json()
-        if not r:
+        url = f"https://api.postcodes.io/postcodes/{postcode.replace(' ', '')}"
+        r = requests.get(url, timeout=10).json()
+
+        if r["status"] != 200:
             return None, None
-        return float(r[0]["lat"]), float(r[0]["lon"])
-    except:
-        return None, None
 
+        result = r["result"]
+        return result["latitude"], result["longitude"]
 
-@st.cache_data
-def geocode_address(address):
-    if pd.isna(address):
-        return None, None
-
-    url = "https://nominatim.openstreetmap.org/search"
-    params = {"format": "json", "q": address}
-
-    headers = {"User-Agent": "smart-job-router"}
-
-    try:
-        r = requests.get(url, params=params, headers=headers, timeout=10).json()
-        if not r:
-            return None, None
-        return float(r[0]["lat"]), float(r[0]["lon"])
     except:
         return None, None
 
@@ -92,24 +69,19 @@ if uploaded_file:
     # ---------------- EXTRACT POSTCODES ----------------
     df["postcode"] = df[address_col].apply(extract_postcode)
 
-    st.write("Extracted postcodes:", df["postcode"].notna().sum())
+    st.write("Sample extracted postcodes:")
+    st.write(df["postcode"].head(10))
 
+    # ---------------- GEOCODING ----------------
     lat_list = []
     lon_list = []
     failed = []
 
-    # ---------------- GEOCODING LOOP ----------------
     for i, row in df.iterrows():
 
         postcode = row["postcode"]
-        address = row[address_col]
 
-        # 1. try postcode
         lat, lon = geocode_postcode(postcode)
-
-        # 2. fallback to full address
-        if lat is None:
-            lat, lon = geocode_address(address)
 
         if lat is None:
             failed.append(i)
@@ -117,12 +89,10 @@ if uploaded_file:
         lat_list.append(lat)
         lon_list.append(lon)
 
-        time.sleep(1)  # avoid API blocking
-
     df["lat"] = lat_list
     df["lon"] = lon_list
 
-    # ---------------- REPORT ISSUES ----------------
+    # ---------------- REPORT ----------------
     st.warning(f"Failed to geocode: {len(failed)} jobs")
 
     df = df.dropna(subset=["lat", "lon"]).reset_index(drop=True)
@@ -130,7 +100,7 @@ if uploaded_file:
     st.write(f"Jobs successfully routed: {len(df)}")
 
     if len(df) == 0:
-        st.error("No valid jobs to route after geocoding.")
+        st.error("No valid jobs after geocoding.")
         st.stop()
 
     # ---------------- CLUSTERING ----------------
@@ -140,6 +110,7 @@ if uploaded_file:
 
     coords = np.radians(df[['lat', 'lon']])
     kmeans = KMeans(n_clusters=engineers, random_state=0, n_init=10)
+
     df["Engineer"] = kmeans.fit_predict(coords)
 
     # ---------------- BALANCING ----------------
