@@ -4,7 +4,7 @@ import numpy as np
 import requests
 from urllib.parse import quote
 
-st.title("Smart Job Router (Dispatch + AM/PM)")
+st.title("Smart Job Router (Full Dispatch + AM/PM)")
 
 uploaded_file = st.file_uploader("Upload Jobs Excel")
 engineers = st.number_input("Number of engineers", min_value=1, value=4)
@@ -22,7 +22,7 @@ def extract_postcode(text):
     return parts[-1].upper()
 
 
-# ---------------- UK POSTCODE GEOCODING ----------------
+# ---------------- UK GEOCODING ----------------
 def geocode_postcode(postcode):
     if not postcode:
         return None, None
@@ -46,7 +46,7 @@ def dist(a, b):
     return (a[0] - b[0])**2 + (a[1] - b[1])**2
 
 
-# ---------------- ROUTE ORDER (nearest neighbour) ----------------
+# ---------------- ROUTE ORDER ----------------
 def order_route(df):
     if len(df) <= 1:
         return df
@@ -94,12 +94,12 @@ if uploaded_file:
         st.error(f"No address column found. Columns: {list(df.columns)}")
         st.stop()
 
-    st.write("Using:", address_col)
+    st.write("Using column:", address_col)
 
     # ---------------- POSTCODES ----------------
     df["postcode"] = df[address_col].apply(extract_postcode)
 
-    st.write("Sample postcodes:")
+    st.write("Sample extracted postcodes:")
     st.write(df["postcode"].head(10))
 
     # ---------------- GEOCODING ----------------
@@ -131,12 +131,11 @@ if uploaded_file:
     st.write(f"Valid jobs: {len(df)}")
 
     # =========================================================
-    # GEOGRAPHIC SEED CLUSTERING (BALANCED)
+    # GEOGRAPHIC SEED + BALANCED ASSIGNMENT
     # =========================================================
 
     df = df.reset_index(drop=True)
 
-    # pick spread-out seeds
     seed_idx = np.linspace(0, len(df) - 1, engineers, dtype=int)
     seeds = df.iloc[seed_idx]
 
@@ -144,7 +143,7 @@ if uploaded_file:
 
     df["Engineer"] = -1
 
-    # assign nearest seed
+    # assign to nearest seed
     for i, row in df.iterrows():
 
         p = (row["lat"], row["lon"])
@@ -152,7 +151,7 @@ if uploaded_file:
         dists = [(e, dist(p, c)) for e, c in enumerate(centers)]
         df.at[i, "Engineer"] = min(dists, key=lambda x: x[1])[0]
 
-    # balance workloads gently
+    # balance workloads
     max_jobs = int(np.ceil(len(df) / engineers))
 
     for e in range(engineers):
@@ -180,7 +179,7 @@ if uploaded_file:
     st.success("Routing complete!")
 
     # =========================================================
-    # OUTPUT (AM / PM RESTORED)
+    # OUTPUT (AM / PM + DISPLAY FIXED)
     # =========================================================
 
     for e in range(engineers):
@@ -202,7 +201,13 @@ if uploaded_file:
         else:
             route = order_route(eng_df)
 
-        st.dataframe(route[[address_col, "postcode", "lat", "lon"]])
+        # ✅ IMPORTANT: Slot now shown
+        cols = [address_col, "postcode"]
+        if "Slot" in route.columns:
+            cols.append("Slot")
+        cols += ["lat", "lon"]
+
+        st.dataframe(route[cols])
 
         if not route.empty:
             link = maps_link(route[address_col].tolist())
