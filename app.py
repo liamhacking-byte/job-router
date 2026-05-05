@@ -4,7 +4,7 @@ import numpy as np
 import requests
 from urllib.parse import quote
 
-st.title("Smart Job Router (Full Dispatch + AM/PM)")
+st.title("Smart Job Router (Balanced AM/PM Dispatch)")
 
 uploaded_file = st.file_uploader("Upload Jobs Excel")
 engineers = st.number_input("Number of engineers", min_value=1, value=4)
@@ -82,7 +82,7 @@ def maps_link(addresses):
     return "https://www.google.com/maps/dir/" + "/".join([quote(a) for a in clean])
 
 
-# ---------------- MAIN APP ----------------
+# ---------------- MAIN ----------------
 if uploaded_file:
 
     df = pd.read_excel(uploaded_file)
@@ -99,7 +99,7 @@ if uploaded_file:
     # ---------------- POSTCODES ----------------
     df["postcode"] = df[address_col].apply(extract_postcode)
 
-    st.write("Sample extracted postcodes:")
+    st.write("Sample postcodes:")
     st.write(df["postcode"].head(10))
 
     # ---------------- GEOCODING ----------------
@@ -131,32 +131,38 @@ if uploaded_file:
     st.write(f"Valid jobs: {len(df)}")
 
     # =========================================================
-    # GEOGRAPHIC SEED + BALANCED ASSIGNMENT
+    # ⚖️ BALANCED AM / PM ASSIGNMENT (CORE FIX)
     # =========================================================
 
-    df = df.reset_index(drop=True)
+    df = df.sample(frac=1, random_state=42).reset_index(drop=True)
 
-    seed_idx = np.linspace(0, len(df) - 1, engineers, dtype=int)
-    seeds = df.iloc[seed_idx]
+    am = df[df["Slot"] == "AM"].copy()
+    pm = df[df["Slot"] == "PM"].copy()
 
-    centers = list(zip(seeds["lat"], seeds["lon"]))
+    am["Engineer"] = np.arange(len(am)) % engineers
+    pm["Engineer"] = np.arange(len(pm)) % engineers
 
-    df["Engineer"] = -1
+    df = pd.concat([am, pm]).reset_index(drop=True)
 
-    # assign to nearest seed
-    for i, row in df.iterrows():
+    # =========================================================
+    # GEOGRAPHIC SEED ADJUSTMENT (LIGHT BALANCING)
+    # =========================================================
 
-        p = (row["lat"], row["lon"])
-
-        dists = [(e, dist(p, c)) for e, c in enumerate(centers)]
-        df.at[i, "Engineer"] = min(dists, key=lambda x: x[1])[0]
-
-    # balance workloads
-    max_jobs = int(np.ceil(len(df) / engineers))
+    centers = []
 
     for e in range(engineers):
+        eng = df[df["Engineer"] == e]
+        if len(eng) > 0:
+            centers.append((eng["lat"].mean(), eng["lon"].mean()))
+        else:
+            centers.append((df["lat"].mean(), df["lon"].mean()))
 
-        cluster = df[df["Engineer"] == e]
+    # optional mild rebalancing (keeps geography sane)
+    max_jobs = int(np.ceil(len(df) / engineers))
+
+    for i in range(engineers):
+
+        cluster = df[df["Engineer"] == i]
 
         if len(cluster) > max_jobs:
 
@@ -170,16 +176,17 @@ if uploaded_file:
 
                 for j in range(engineers):
                     if len(df[df["Engineer"] == j]) < max_jobs:
-                        options.append((j, dist(p, centers[j])))
+                        c = centers[j]
+                        options.append((j, dist(p, c)))
 
                 if options:
-                    new_e = min(options, key=lambda x: x[1])[0]
-                    df.at[idx, "Engineer"] = new_e
+                    new_eng = min(options, key=lambda x: x[1])[0]
+                    df.at[idx, "Engineer"] = new_eng
 
     st.success("Routing complete!")
 
     # =========================================================
-    # OUTPUT (AM / PM + DISPLAY FIXED)
+    # OUTPUT (AM / PM CLEAN DISPLAY)
     # =========================================================
 
     for e in range(engineers):
@@ -201,13 +208,7 @@ if uploaded_file:
         else:
             route = order_route(eng_df)
 
-        # ✅ IMPORTANT: Slot now shown
-        cols = [address_col, "postcode"]
-        if "Slot" in route.columns:
-            cols.append("Slot")
-        cols += ["lat", "lon"]
-
-        st.dataframe(route[cols])
+        st.dataframe(route[[address_col, "postcode", "Slot", "lat", "lon"]])
 
         if not route.empty:
             link = maps_link(route[address_col].tolist())
