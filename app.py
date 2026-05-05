@@ -1,3 +1,41 @@
+
+import streamlit as st
+import pandas as pd
+import requests
+import numpy as np
+from sklearn.cluster import KMeans
+from urllib.parse import quote
+
+st.title("Smart Job Router (Pro)")
+
+uploaded_file = st.file_uploader("Upload Jobs Excel")
+
+engineers = st.number_input("Number of engineers", min_value=1, value=4)
+
+
+# --- Geocode ---
+@st.cache_data
+def geocode(address):
+    if pd.isna(address):
+        return None, None
+
+    url = f"https://nominatim.openstreetmap.org/search?format=json&q={address}"
+    headers = {"User-Agent": "smart-job-router"}
+
+    try:
+        r = requests.get(url, headers=headers, timeout=10).json()
+        if not r:
+            return None, None
+        return float(r[0]['lat']), float(r[0]['lon'])
+    except:
+        return None, None
+
+
+def maps_link(addresses):
+    return "https://www.google.com/maps/dir/" + "/".join([quote(a) for a in addresses])
+
+
+# ---------------- MAIN APP ----------------
 if uploaded_file:
 
     df = pd.read_excel(uploaded_file)
