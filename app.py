@@ -2,13 +2,14 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import requests
-from sklearn.cluster import KMeans
 from urllib.parse import quote
 
-st.title("Smart Job Router (True Geographic Clustering)")
+st.title("Smart Job Router (Max 5 Jobs per Engineer)")
 
 uploaded_file = st.file_uploader("Upload Jobs Excel")
+
 engineers = st.number_input("Number of engineers", min_value=1, value=4)
+MAX_JOBS = 5  # 🔥 HARD LIMIT
 
 
 # ---------------- POSTCODE ----------------
@@ -38,6 +39,11 @@ def geocode_postcode(pc):
         return None, None
 
 
+# ---------------- DISTANCE ----------------
+def dist(a, b):
+    return (a[0] - b[0])**2 + (a[1] - b[1])**2
+
+
 # ---------------- ROUTE ORDER ----------------
 def order_route(df):
     if len(df) <= 1:
@@ -55,7 +61,7 @@ def order_route(df):
         cp = (current["lat"], current["lon"])
 
         remaining["d"] = remaining.apply(
-            lambda r: (r["lat"] - cp[0])**2 + (r["lon"] - cp[1])**2,
+            lambda r: dist(cp, (r["lat"], r["lon"])),
             axis=1
         )
 
@@ -107,22 +113,47 @@ if uploaded_file:
     st.success(f"Valid jobs: {len(df)}")
 
     # =========================================================
-    # 🧭 TRUE GEOGRAPHIC CLUSTERING (THIS FIXES YOUR ISSUE)
+    # 🧠 CAPACITY + GEO BALANCED ASSIGNMENT (FINAL FIX)
     # =========================================================
 
-    kmeans = KMeans(n_clusters=engineers, random_state=42, n_init="auto")
-    df["Cluster"] = kmeans.fit_predict(df[["lat", "lon"]])
+    df["Engineer"] = -1
 
-    # assign clusters to engineers
-    cluster_ids = df["Cluster"].unique()
+    counts = {i: 0 for i in range(engineers)}
 
-    cluster_to_engineer = {
-        c: i % engineers for i, c in enumerate(cluster_ids)
-    }
+    # engineer "centres"
+    seed_idx = np.linspace(0, len(df)-1, engineers, dtype=int)
+    seeds = df.iloc[seed_idx]
+    centers = list(zip(seeds["lat"], seeds["lon"]))
 
-    df["Engineer"] = df["Cluster"].map(cluster_to_engineer)
+    for i, row in df.iterrows():
 
-    st.success("Clusters assigned to engineers")
+        point = (row["lat"], row["lon"])
+
+        best_engineer = None
+        best_score = float("inf")
+
+        for e in range(engineers):
+
+            # 🚨 HARD LIMIT
+            if counts[e] >= MAX_JOBS:
+                continue
+
+            geo = dist(point, centers[e])
+
+            score = geo + counts[e] * 0.2
+
+            if score < best_score:
+                best_score = score
+                best_engineer = e
+
+        # fallback (if all full)
+        if best_engineer is None:
+            best_engineer = min(counts, key=counts.get)
+
+        df.at[i, "Engineer"] = best_engineer
+        counts[best_engineer] += 1
+
+    st.success("Routing complete (max 5 enforced)!")
 
     # =========================================================
     # 📦 OUTPUT
