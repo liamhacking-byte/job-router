@@ -4,23 +4,25 @@ import requests
 import numpy as np
 from sklearn.cluster import KMeans
 from urllib.parse import quote
+import time
 
-st.title("Smart Job Router (Pro)")
+st.title("Smart Job Router (Pro - Postcode Optimised)")
 
 uploaded_file = st.file_uploader("Upload Jobs Excel")
 engineers = st.number_input("Number of engineers", min_value=1, value=4)
 
 
-# ---------------- GEOLOCATION ----------------
+# ---------------- GEOLOCATION (POSTCODE FIRST) ----------------
 @st.cache_data
-def geocode(address):
-    if pd.isna(address):
+def geocode_postcode(postcode):
+    if pd.isna(postcode):
         return None, None
 
     url = "https://nominatim.openstreetmap.org/search"
     params = {
         "format": "json",
-        "q": address
+        "q": postcode,
+        "countrycodes": "gb"   # UK optimisation
     }
 
     headers = {"User-Agent": "smart-job-router"}
@@ -34,82 +36,121 @@ def geocode(address):
         return None, None
 
 
-# ---------------- MAPS ROUTE ----------------
+# fallback full address
+@st.cache_data
+def geocode_address(address):
+    if pd.isna(address):
+        return None, None
+
+    url = "https://nominatim.openstreetmap.org/search"
+    params = {"format": "json", "q": address}
+
+    headers = {"User-Agent": "smart-job-router"}
+
+    try:
+        r = requests.get(url, params=params, headers=headers, timeout=10).json()
+        if not r:
+            return None, None
+        return float(r[0]["lat"]), float(r[0]["lon"])
+    except:
+        return None, None
+
+
+# ---------------- ROUTE LINK ----------------
 def maps_link(addresses):
     clean = [str(a) for a in addresses if pd.notna(a)]
     return "https://www.google.com/maps/dir/" + "/".join([quote(a) for a in clean])
 
 
-# ---------------- MAIN APP ----------------
+# ---------------- MAIN ----------------
 if uploaded_file:
 
     df = pd.read_excel(uploaded_file)
     df.columns = df.columns.str.strip()
 
-    # detect address column
-    possible_cols = ['Address', 'address', 'Full Address', 'Job Address']
-    address_col = next((col for col in possible_cols if col in df.columns), None)
+    # ---------------- COLUMN DETECTION ----------------
+    postcode_col = next((c for c in df.columns if "post" in c.lower()), None)
+    address_col = next((c for c in df.columns if "address" in c.lower()), None)
 
-    if not address_col:
-        st.error("No address column found in Excel file.")
+    if not postcode_col:
+        st.error("No postcode column found (must contain 'postcode' in column name)")
+        st.stop()
 
-    elif 'Slot' not in df.columns:
-        st.error("Missing 'Slot' column (must be AM/PM).")
+    st.write("Using postcode:", postcode_col)
 
-    else:
-        st.write("Geocoding addresses... (this may take a moment)")
+    # ---------------- GEOCODING ----------------
+    lat_list = []
+    lon_list = []
+    failed = []
 
-        # geocode
-        df[['lat', 'lon']] = df[address_col].apply(
-            lambda x: pd.Series(geocode(x))
-        )
+    for i, row in df.iterrows():
 
-        df = df.dropna(subset=['lat', 'lon']).reset_index(drop=True)
+        postcode = row[postcode_col]
+        address = row[address_col] if address_col else None
 
-        if len(df) < engineers:
-            st.error("Not enough jobs for number of engineers.")
-            st.stop()
+        lat, lon = geocode_postcode(postcode)
 
-        # ---------------- CLUSTERING ----------------
-        coords = np.radians(df[['lat', 'lon']])
-        kmeans = KMeans(n_clusters=engineers, random_state=0, n_init=10)
+        # fallback if postcode fails
+        if lat is None:
+            lat, lon = geocode_address(address)
 
-        df['Engineer'] = kmeans.fit_predict(coords)
+        if lat is None:
+            failed.append(i)
 
-        # ---------------- BALANCING ----------------
-        max_jobs = int(np.ceil(len(df) / engineers))
+        lat_list.append(lat)
+        lon_list.append(lon)
 
-        for i in range(engineers):
-            cluster = df[df['Engineer'] == i]
+        time.sleep(1)  # avoids API blocking
 
-            if len(cluster) > max_jobs:
-                excess = cluster.iloc[max_jobs:]
+    df["lat"] = lat_list
+    df["lon"] = lon_list
 
-                for idx, row in excess.iterrows():
-                    distances = (
-                        (df['lat'] - row['lat'])**2 +
-                        (df['lon'] - row['lon'])**2
-                    )
+    # ---------------- REPORT FAILURES ----------------
+    if len(failed) > 0:
+        st.warning(f"{len(failed)} jobs could not be geocoded")
 
-                    nearest = distances.idxmin()
-                    df.at[idx, 'Engineer'] = df.loc[nearest, 'Engineer']
+    df = df.dropna(subset=["lat", "lon"]).reset_index(drop=True)
 
-        st.success("Routing complete!")
+    st.write(f"Jobs being routed: {len(df)}")
 
-        # ---------------- OUTPUT ----------------
-        for i in range(engineers):
+    # ---------------- CLUSTERING ----------------
+    if len(df) < engineers:
+        st.error("Not enough valid jobs for number of engineers")
+        st.stop()
 
-            st.subheader(f"Engineer {i+1}")
+    coords = np.radians(df[['lat', 'lon']])
+    kmeans = KMeans(n_clusters=engineers, random_state=0, n_init=10)
+    df["Engineer"] = kmeans.fit_predict(coords)
 
-            eng_jobs = df[df['Engineer'] == i]
+    # ---------------- BALANCE ----------------
+    max_jobs = int(np.ceil(len(df) / engineers))
 
-            am = eng_jobs[eng_jobs['Slot'] == 'AM']
-            pm = eng_jobs[eng_jobs['Slot'] == 'PM']
+    for i in range(engineers):
+        cluster = df[df["Engineer"] == i]
 
-            route = pd.concat([am, pm])
+        if len(cluster) > max_jobs:
+            extra = cluster.iloc[max_jobs:]
 
-            st.dataframe(route[[address_col, 'Slot']])
+            for idx, row in extra.iterrows():
+                distances = (
+                    (df['lat'] - row['lat'])**2 +
+                    (df['lon'] - row['lon'])**2
+                )
 
-            if not route.empty:
-                link = maps_link(route[address_col].tolist())
-                st.markdown(f"[Open Route in Google Maps]({link})")
+                nearest = distances.idxmin()
+                df.at[idx, "Engineer"] = df.loc[nearest, "Engineer"]
+
+    st.success("Routing complete!")
+
+    # ---------------- OUTPUT ----------------
+    for i in range(engineers):
+
+        st.subheader(f"Engineer {i+1}")
+
+        eng_jobs = df[df["Engineer"] == i]
+
+        st.dataframe(eng_jobs[[postcode_col] + ([address_col] if address_col else [])])
+
+        if not eng_jobs.empty:
+            link = maps_link(eng_jobs[address_col].tolist() if address_col else eng_jobs[postcode_col].tolist())
+            st.markdown(f"[Open Route in Google Maps]({link})")
