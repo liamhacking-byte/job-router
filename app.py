@@ -3,6 +3,8 @@ import pandas as pd
 import numpy as np
 import requests
 from urllib.parse import quote
+from sklearn.cluster import KMeans
+from math import radians, sin, cos, sqrt, atan2
 
 st.title("Smart Job Router (Geographic Dispatch Engine)")
 
@@ -16,13 +18,10 @@ def extract_postcode(text):
         return None
 
     parts = [p.strip() for p in str(text).split(",") if p.strip()]
-    if not parts:
-        return None
-
-    return parts[-1].upper()
+    return parts[-1].upper() if parts else None
 
 
-# ---------------- UK POSTCODE GEOCODING ----------------
+# ---------------- GEOCODING ----------------
 @st.cache_data
 def geocode_postcode(postcode):
     if not postcode:
@@ -35,32 +34,43 @@ def geocode_postcode(postcode):
         if r["status"] != 200:
             return None, None
 
-        result = r["result"]
-        return result["latitude"], result["longitude"]
+        res = r["result"]
+        return res["latitude"], res["longitude"]
 
     except:
         return None, None
 
 
-# ---------------- ROUTING HELPERS ----------------
+# ---------------- HAVERSINE DISTANCE ----------------
 def distance(a, b):
-    return (a[0] - b[0])**2 + (a[1] - b[1])**2
+    R = 6371  # km
+
+    lat1, lon1 = map(radians, a)
+    lat2, lon2 = map(radians, b)
+
+    dlat = lat2 - lat1
+    dlon = lon2 - lon1
+
+    h = sin(dlat/2)**2 + cos(lat1)*cos(lat2)*sin(dlon/2)**2
+    return 2 * R * atan2(sqrt(h), sqrt(1 - h))
 
 
+# ---------------- OPTIONAL ROUTE ORDERING ----------------
 def order_route(df):
-    """Nearest-neighbour route ordering"""
-    if len(df) <= 1:
+    """Simple nearest-neighbour ordering inside cluster"""
+    if len(df) <= 2:
         return df
+
+    df = df.copy().reset_index(drop=True)
 
     remaining = df.copy()
     route = []
 
     current = remaining.iloc[0]
     route.append(current)
-    remaining = remaining.drop(current.name)
+    remaining = remaining.drop(0)
 
     while len(remaining) > 0:
-
         current_point = (current["lat"], current["lon"])
 
         remaining["dist"] = remaining.apply(
@@ -77,12 +87,21 @@ def order_route(df):
     return pd.DataFrame(route).drop(columns=["dist"], errors="ignore")
 
 
+# ---------------- GOOGLE MAPS LINK ----------------
 def maps_link(addresses):
-    clean = [str(a) for a in addresses if pd.notna(a)]
-    return "https://www.google.com/maps/dir/" + "/".join([quote(a) for a in clean])
+    clean = [str(a).strip() for a in addresses if pd.notna(a)]
+
+    if len(clean) <= 1:
+        return None
+
+    return (
+        "https://www.google.com/maps/dir/?api=1"
+        "&travelmode=driving"
+        "&waypoints=" + "|".join(quote(a) for a in clean[1:])
+    )
 
 
-# ---------------- MAIN APP ----------------
+# ---------------- MAIN ----------------
 if uploaded_file:
 
     df = pd.read_excel(uploaded_file)
@@ -91,105 +110,54 @@ if uploaded_file:
     address_col = next((c for c in df.columns if "address" in c.lower()), None)
 
     if not address_col:
-        st.error(f"No address column found. Columns: {list(df.columns)}")
+        st.error("No address column found.")
         st.stop()
 
     st.write("Using column:", address_col)
 
-    # ---------------- EXTRACT POSTCODES ----------------
+    # ---------------- POSTCODES ----------------
     df["postcode"] = df[address_col].apply(extract_postcode)
 
-    st.write("Sample postcodes:")
-    st.write(df["postcode"].head(10))
+    # ---------------- BATCH GEOCODING ----------------
+    unique_pcs = df["postcode"].dropna().unique()
 
-    # ---------------- GEOCODING ----------------
-    lat_list = []
-    lon_list = []
-    failed = []
+    cache = {}
+    for pc in unique_pcs:
+        cache[pc] = geocode_postcode(pc)
 
-    for _, row in df.iterrows():
-
-        lat, lon = geocode_postcode(row["postcode"])
-
-        if lat is None:
-            failed.append(True)
-
-        lat_list.append(lat)
-        lon_list.append(lon)
-
-    df["lat"] = lat_list
-    df["lon"] = lon_list
-
-    st.warning(f"Failed geocoding: {len(failed)} jobs")
+    df["lat"] = df["postcode"].map(lambda x: cache.get(x, (None, None))[0])
+    df["lon"] = df["postcode"].map(lambda x: cache.get(x, (None, None))[1])
 
     df = df.dropna(subset=["lat", "lon"]).reset_index(drop=True)
 
-    if len(df) == 0:
-        st.error("No valid jobs after geocoding.")
+    if df.empty:
+        st.error("No valid geocoded jobs.")
         st.stop()
 
-    st.write(f"Valid jobs: {len(df)}")
+    st.success(f"Valid jobs: {len(df)}")
 
-    # =========================================================
-    # 🧠 GEOGRAPHIC SEED-BASED CLUSTERING (FIX FOR YOUR ISSUE)
-    # =========================================================
+    # ======================================================
+    # 🧠 REAL GEOGRAPHIC CLUSTERING (FIXED CORE LOGIC)
+    # ======================================================
 
-    df = df.reset_index(drop=True)
+    coords = df[["lat", "lon"]].values
 
-    # 1. pick evenly spaced geographic seeds
-    seed_indices = np.linspace(0, len(df) - 1, engineers, dtype=int)
-    seeds = df.iloc[seed_indices]
+    kmeans = KMeans(
+        n_clusters=min(engineers, len(df)),
+        random_state=42,
+        n_init=10
+    )
 
-    centers = list(zip(seeds["lat"], seeds["lon"]))
+    df["Engineer"] = kmeans.fit_predict(coords)
 
-    df["Engineer"] = -1
-
-    # 2. assign each job to nearest seed
-    for idx, row in df.iterrows():
-
-        point = (row["lat"], row["lon"])
-
-        distances = [
-            (i, distance(point, c))
-            for i, c in enumerate(centers)
-        ]
-
-        df.at[idx, "Engineer"] = min(distances, key=lambda x: x[1])[0]
-
-    # 3. balance workloads gently (without breaking geography)
-    max_jobs = int(np.ceil(len(df) / engineers))
-
-    for i in range(engineers):
-
-        cluster = df[df["Engineer"] == i]
-
-        if len(cluster) > max_jobs:
-
-            excess = cluster.iloc[max_jobs:]
-
-            for idx, row in excess.iterrows():
-
-                point = (row["lat"], row["lon"])
-
-                candidates = []
-
-                for j in range(engineers):
-
-                    if len(df[df["Engineer"] == j]) < max_jobs:
-                        center = centers[j]
-                        dist = distance(point, center)
-                        candidates.append((j, dist))
-
-                if candidates:
-                    new_eng = min(candidates, key=lambda x: x[1])[0]
-                    df.at[idx, "Engineer"] = new_eng
-
-    st.success("Routing complete!")
+    st.success("Clustering complete!")
 
     # ---------------- OUTPUT ----------------
-    for i in range(engineers):
+    for i in sorted(df["Engineer"].unique()):
 
         eng_df = df[df["Engineer"] == i].copy()
+
+        # OPTIONAL: comment this out if you only want zones
         eng_df = order_route(eng_df)
 
         st.subheader(f"Engineer {i+1}")
@@ -200,4 +168,5 @@ if uploaded_file:
 
         if not eng_df.empty:
             link = maps_link(eng_df[address_col].tolist())
-            st.markdown(f"[Open Route in Google Maps]({link})")
+            if link:
+                st.markdown(f"[Open Route in Google Maps]({link})")
