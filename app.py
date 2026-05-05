@@ -4,7 +4,7 @@ import numpy as np
 import requests
 from urllib.parse import quote
 
-st.title("Smart Job Router (Balanced AM/PM Dispatch)")
+st.title("Smart Job Router (Balanced Dispatch Engine)")
 
 uploaded_file = st.file_uploader("Upload Jobs Excel")
 engineers = st.number_input("Number of engineers", min_value=1, value=4)
@@ -46,7 +46,7 @@ def dist(a, b):
     return (a[0] - b[0])**2 + (a[1] - b[1])**2
 
 
-# ---------------- ROUTE ORDER ----------------
+# ---------------- ROUTE ORDER (NEAREST NEIGHBOUR) ----------------
 def order_route(df):
     if len(df) <= 1:
         return df
@@ -94,13 +94,10 @@ if uploaded_file:
         st.error(f"No address column found. Columns: {list(df.columns)}")
         st.stop()
 
-    st.write("Using column:", address_col)
+    st.write("Using:", address_col)
 
     # ---------------- POSTCODES ----------------
     df["postcode"] = df[address_col].apply(extract_postcode)
-
-    st.write("Sample postcodes:")
-    st.write(df["postcode"].head(10))
 
     # ---------------- GEOCODING ----------------
     lat_list = []
@@ -131,62 +128,63 @@ if uploaded_file:
     st.write(f"Valid jobs: {len(df)}")
 
     # =========================================================
-    # ⚖️ BALANCED AM / PM ASSIGNMENT (CORE FIX)
+    # 🧠 STEP 1: CREATE GEOGRAPHIC ENGINEER ZONES
     # =========================================================
 
-    df = df.sample(frac=1, random_state=42).reset_index(drop=True)
+    df = df.reset_index(drop=True)
 
-    am = df[df["Slot"] == "AM"].copy()
-    pm = df[df["Slot"] == "PM"].copy()
+    seed_idx = np.linspace(0, len(df) - 1, engineers, dtype=int)
+    seeds = df.iloc[seed_idx]
 
-    am["Engineer"] = np.arange(len(am)) % engineers
-    pm["Engineer"] = np.arange(len(pm)) % engineers
+    centers = list(zip(seeds["lat"], seeds["lon"]))
 
-    df = pd.concat([am, pm]).reset_index(drop=True)
+    # balance counters
+    am_count = {i: 0 for i in range(engineers)}
+    pm_count = {i: 0 for i in range(engineers)}
+
+    df["Engineer"] = -1
+
 
     # =========================================================
-    # GEOGRAPHIC SEED ADJUSTMENT (LIGHT BALANCING)
+    # 🧠 STEP 2: SMART ASSIGNMENT (GEO + AM/PM BALANCE)
     # =========================================================
 
-    centers = []
+    def score(engineer, point, slot):
 
-    for e in range(engineers):
-        eng = df[df["Engineer"] == e]
-        if len(eng) > 0:
-            centers.append((eng["lat"].mean(), eng["lon"].mean()))
+        geo = dist(point, centers[engineer])
+
+        balance = 0
+        if slot == "AM":
+            balance = am_count[engineer] * 0.4
         else:
-            centers.append((df["lat"].mean(), df["lon"].mean()))
+            balance = pm_count[engineer] * 0.4
 
-    # optional mild rebalancing (keeps geography sane)
-    max_jobs = int(np.ceil(len(df) / engineers))
+        return geo + balance
 
-    for i in range(engineers):
 
-        cluster = df[df["Engineer"] == i]
+    for i, row in df.iterrows():
 
-        if len(cluster) > max_jobs:
+        point = (row["lat"], row["lon"])
+        slot = row["Slot"]
 
-            excess = cluster.iloc[max_jobs:]
+        best_engineer = min(
+            range(engineers),
+            key=lambda e: score(e, point, slot)
+        )
 
-            for idx, row in excess.iterrows():
+        df.at[i, "Engineer"] = best_engineer
 
-                p = (row["lat"], row["lon"])
+        if slot == "AM":
+            am_count[best_engineer] += 1
+        else:
+            pm_count[best_engineer] += 1
 
-                options = []
-
-                for j in range(engineers):
-                    if len(df[df["Engineer"] == j]) < max_jobs:
-                        c = centers[j]
-                        options.append((j, dist(p, c)))
-
-                if options:
-                    new_eng = min(options, key=lambda x: x[1])[0]
-                    df.at[idx, "Engineer"] = new_eng
 
     st.success("Routing complete!")
 
+
     # =========================================================
-    # OUTPUT (AM / PM CLEAN DISPLAY)
+    # OUTPUT (AM / PM + ROUTED)
     # =========================================================
 
     for e in range(engineers):
