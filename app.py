@@ -5,7 +5,7 @@ import requests
 from sklearn.cluster import KMeans
 from urllib.parse import quote
 
-st.title("Smart Job Router (Tight Geographic Clusters)")
+st.title("Smart Job Router (Stable Geo Version)")
 
 uploaded_file = st.file_uploader("Upload Jobs Excel")
 
@@ -44,7 +44,7 @@ def route(df):
     out.append(current)
     remaining = remaining.drop(current.name)
 
-    while len(remaining):
+    while len(remaining) > 0:
         cp = (current["lat"], current["lon"])
 
         remaining["d"] = remaining.apply(
@@ -73,6 +73,10 @@ if uploaded_file:
 
     address_col = next((c for c in df.columns if "address" in c.lower()), None)
 
+    if not address_col:
+        st.error("No address column found")
+        st.stop()
+
     df["postcode"] = df[address_col].apply(extract_postcode)
 
     lat, lon = [], []
@@ -90,7 +94,7 @@ if uploaded_file:
     st.write(f"Valid jobs: {len(df)}")
 
     # =====================================================
-    # 🧭 STEP 1: STRONG GEOGRAPHIC CLUSTERING
+    # 🧭 STEP 1: GEO CLUSTERING
     # =====================================================
 
     n_clusters = ENGINEERS * MAX_JOBS
@@ -98,44 +102,33 @@ if uploaded_file:
     kmeans = KMeans(n_clusters=n_clusters, random_state=42, n_init="auto")
     df["cluster"] = kmeans.fit_predict(df[["lat", "lon"]])
 
-    # sort clusters by location density
-    cluster_sizes = df["cluster"].value_counts()
+    # sort clusters by size (biggest first)
+    cluster_order = df["cluster"].value_counts().index.tolist()
 
     # =====================================================
-    # 🧠 STEP 2: ASSIGN CLUSTERS INTO ENGINEERS
+    # 🧠 STEP 2: SIMPLE BALANCED ASSIGNMENT
     # =====================================================
 
-    engineer_jobs = {i: [] for i in range(ENGINEERS)}
-    engineer_counts = {i: 0 for i in range(ENGINEERS)}
+    df["Engineer"] = -1
+    counts = {i: 0 for i in range(ENGINEERS)}
 
-    for cluster in cluster_sizes.index:
+    for c in cluster_order:
 
-        cluster_df = df[df["cluster"] == cluster]
+        cluster_df = df[df["cluster"] == c]
 
         for _, row in cluster_df.iterrows():
 
-            best = min(engineer_counts, key=engineer_counts.get)
+            best = min(counts, key=counts.get)
 
-            if engineer_counts[best] < MAX_JOBS:
-                engineer_jobs[best].append(row)
-                engineer_counts[best] += 1
+            if counts[best] >= MAX_JOBS:
+                continue
 
-    # build final dataframe
-    final = []
+            df.loc[row.name, "Engineer"] = best
+            counts[best] += 1
 
-    for e, rows in engineer_jobs.items():
-        for r in rows:
-            final.append({
-                address_col: r[address_col],
-                "postcode": r["postcode"],
-                "lat": r["lat"],
-                "lon": r["lon"],
-                "Engineer": e
-            })
+    df = df[df["Engineer"] != -1]
 
-    df = pd.DataFrame(final)
-
-    st.success("Tight geographic routing complete")
+    st.success("Routing complete")
 
     # =====================================================
     # OUTPUT
@@ -149,7 +142,7 @@ if uploaded_file:
 
         eng = route(eng)
 
-        st.dataframe(eng)
+        st.dataframe(eng[[address_col, "postcode", "lat", "lon"]])
 
         if len(eng):
             st.markdown(
