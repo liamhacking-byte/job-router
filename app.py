@@ -8,7 +8,7 @@ from math import radians, sin, cos, sqrt, atan2
 from ortools.constraint_solver import pywrapcp
 from ortools.constraint_solver import routing_enums_pb2
 
-st.title("Smart Job Router (Optimised Dispatch Engine - OR Tools)")
+st.title("Smart Job Router (Optimised Dispatch Engine)")
 
 uploaded_file = st.file_uploader("Upload Jobs Excel")
 engineers = st.number_input("Number of engineers", min_value=1, value=4)
@@ -46,9 +46,10 @@ def geocode_postcode(postcode):
         return None, None
 
 
-# ---------------- DISTANCE (HAVERSINE) ----------------
+# ---------------- DISTANCE ----------------
 def distance(a, b):
     R = 6371
+
     lat1, lon1 = map(radians, a)
     lat2, lon2 = map(radians, b)
 
@@ -73,13 +74,13 @@ def maps_link(addresses):
     )
 
 
-# ---------------- OR-TOOLS SOLVER ----------------
-def solve_vrp(distance_matrix, num_vehicles, demands, vehicle_capacity):
+# ---------------- VRP SOLVER ----------------
+def solve_vrp(distance_matrix, num_vehicles, demands, vehicle_capacities):
 
     manager = pywrapcp.RoutingIndexManager(
         len(distance_matrix),
         num_vehicles,
-        0  # depot = first node
+        0
     )
 
     routing = pywrapcp.RoutingModel(manager)
@@ -93,7 +94,7 @@ def solve_vrp(distance_matrix, num_vehicles, demands, vehicle_capacity):
     transit_cb = routing.RegisterTransitCallback(dist_cb)
     routing.SetArcCostEvaluatorOfAllVehicles(transit_cb)
 
-    # capacity constraint
+    # demand callback
     def demand_cb(from_index):
         from_node = manager.IndexToNode(from_index)
         return demands[from_node]
@@ -103,7 +104,7 @@ def solve_vrp(distance_matrix, num_vehicles, demands, vehicle_capacity):
     routing.AddDimensionWithVehicleCapacity(
         demand_cb_idx,
         0,
-        vehicle_capacity,
+        vehicle_capacities,
         True,
         "Capacity"
     )
@@ -176,7 +177,6 @@ if uploaded_file:
     # ======================================================
 
     coords = list(zip(df["lat"], df["lon"]))
-
     n = len(coords)
 
     distance_matrix = [
@@ -187,11 +187,19 @@ if uploaded_file:
         for i in range(n)
     ]
 
-    # demand = 1 per job
+    # each job = 1 unit
     demands = [1] * n
 
-    # vehicle capacity = 4–5 jobs
-    capacity = MAX_JOBS
+    # ======================================================
+    # ⚠️ FIXED CAPACITY (IMPORTANT FIX)
+    # ======================================================
+
+    vehicle_capacities = [MAX_JOBS] * engineers
+
+    # safety check (prevents no-solution error)
+    if n > engineers * MAX_JOBS:
+        st.error("Too many jobs for available engineers (max 5 each).")
+        st.stop()
 
     # ======================================================
     # 🚀 SOLVE VRP
@@ -201,7 +209,7 @@ if uploaded_file:
         distance_matrix,
         engineers,
         demands,
-        capacity
+        vehicle_capacities
     )
 
     if not routes:
