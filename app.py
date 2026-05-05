@@ -58,6 +58,21 @@ def distance(a, b):
     return 2 * R * atan2(sqrt(h), sqrt(1 - h))
 
 
+# ---------------- CLUSTER SPREAD (NEW FIX) ----------------
+def cluster_spread(cluster):
+    """Measures how geographically tight a cluster is"""
+    if len(cluster) <= 1:
+        return 0
+
+    pts = cluster[["lat", "lon"]].values
+    center = np.mean(pts, axis=0)
+
+    return np.mean([
+        distance((p[0], p[1]), (center[0], center[1]))
+        for p in pts
+    ])
+
+
 # ---------------- ROUTE ORDERING (LOCAL ONLY) ----------------
 def order_route(df):
     if len(df) <= 2:
@@ -139,11 +154,10 @@ if uploaded_file:
     st.success(f"Valid jobs: {len(df)}")
 
     # ======================================================
-    # 🧠 GEOGRAPHIC CLUSTERING (BASE STRUCTURE)
+    # 🧠 GEOGRAPHIC CLUSTERING
     # ======================================================
 
     coords = df[["lat", "lon"]].values
-
     n_clusters = min(engineers, len(df))
 
     kmeans = KMeans(
@@ -153,7 +167,6 @@ if uploaded_file:
     )
 
     df["Engineer"] = kmeans.fit_predict(coords)
-
     centroids = kmeans.cluster_centers_
 
     # helper
@@ -161,7 +174,7 @@ if uploaded_file:
         return len(df[df["Engineer"] == e])
 
     # ======================================================
-    # ⚖️ ENFORCE MAX CAPACITY (4–5 JOBS PER ENGINEER)
+    # ⚖️ IMPROVED CAPACITY BALANCING (FIXED ISSUE)
     # ======================================================
 
     for e in range(n_clusters):
@@ -184,15 +197,22 @@ if uploaded_file:
 
                         center = centroids[j]
 
-                        dist = distance(point, (center[0], center[1]))
-                        candidates.append((j, dist))
+                        cluster_j = df[df["Engineer"] == j]
+
+                        # NEW: combine centroid distance + cluster compactness
+                        centroid_dist = distance(point, (center[0], center[1]))
+                        spread_penalty = cluster_spread(cluster_j)
+
+                        score = centroid_dist + (0.5 * spread_penalty)
+
+                        candidates.append((j, score))
 
                 if candidates:
                     new_cluster = min(candidates, key=lambda x: x[1])[0]
                     df.at[idx, "Engineer"] = new_cluster
 
     # ======================================================
-    # ⚖️ OPTIONAL: FILL UNDERFILLED CLUSTERS
+    # ⚖️ FILL UNDERFILLED CLUSTERS
     # ======================================================
 
     for e in range(n_clusters):
@@ -223,7 +243,6 @@ if uploaded_file:
 
         eng_df = df[df["Engineer"] == e].copy()
 
-        # small clusters → safe ordering
         eng_df = order_route(eng_df)
 
         st.subheader(f"Engineer {e + 1}")
