@@ -2,14 +2,15 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import requests
+from sklearn.cluster import KMeans
 from urllib.parse import quote
 
-st.title("Smart Job Router (Max 5 Jobs per Engineer)")
+st.title("Smart Job Router (Tight Geographic Clustering)")
 
 uploaded_file = st.file_uploader("Upload Jobs Excel")
 
 engineers = st.number_input("Number of engineers", min_value=1, value=4)
-MAX_JOBS = 5  # 🔥 HARD LIMIT
+MAX_JOBS = 5
 
 
 # ---------------- POSTCODE ----------------
@@ -39,11 +40,6 @@ def geocode_postcode(pc):
         return None, None
 
 
-# ---------------- DISTANCE ----------------
-def dist(a, b):
-    return (a[0] - b[0])**2 + (a[1] - b[1])**2
-
-
 # ---------------- ROUTE ORDER ----------------
 def order_route(df):
     if len(df) <= 1:
@@ -61,7 +57,7 @@ def order_route(df):
         cp = (current["lat"], current["lon"])
 
         remaining["d"] = remaining.apply(
-            lambda r: dist(cp, (r["lat"], r["lon"])),
+            lambda r: (r["lat"] - cp[0])**2 + (r["lon"] - cp[1])**2,
             axis=1
         )
 
@@ -113,47 +109,46 @@ if uploaded_file:
     st.success(f"Valid jobs: {len(df)}")
 
     # =========================================================
-    # 🧠 CAPACITY + GEO BALANCED ASSIGNMENT (FINAL FIX)
+    # 🧭 STEP 1 — OVER-CLUSTER GEOGRAPHICALLY
     # =========================================================
 
-    df["Engineer"] = -1
+    n_clusters = engineers * MAX_JOBS
 
-    counts = {i: 0 for i in range(engineers)}
+    kmeans = KMeans(n_clusters=n_clusters, random_state=42, n_init="auto")
+    df["Cluster"] = kmeans.fit_predict(df[["lat", "lon"]])
 
-    # engineer "centres"
-    seed_idx = np.linspace(0, len(df)-1, engineers, dtype=int)
-    seeds = df.iloc[seed_idx]
-    centers = list(zip(seeds["lat"], seeds["lon"]))
+    cluster_centers = df.groupby("Cluster")[["lat", "lon"]].mean()
 
-    for i, row in df.iterrows():
+    # =========================================================
+    # 🧠 STEP 2 — ASSIGN CLUSTERS TO ENGINEERS (BALANCED)
+    # =========================================================
 
-        point = (row["lat"], row["lon"])
+    cluster_sizes = df["Cluster"].value_counts().to_dict()
+    clusters = list(cluster_sizes.keys())
 
-        best_engineer = None
-        best_score = float("inf")
+    engineer_load = {i: 0 for i in range(engineers)}
+    cluster_to_engineer = {}
 
-        for e in range(engineers):
+    for c in sorted(clusters, key=lambda x: cluster_sizes[x], reverse=True):
 
-            # 🚨 HARD LIMIT
-            if counts[e] >= MAX_JOBS:
-                continue
+        best_engineer = min(engineer_load, key=engineer_load.get)
 
-            geo = dist(point, centers[e])
+        # enforce max capacity
+        if engineer_load[best_engineer] + cluster_sizes[c] > MAX_JOBS:
+            continue
 
-            score = geo + counts[e] * 0.2
+        cluster_to_engineer[c] = best_engineer
+        engineer_load[best_engineer] += cluster_sizes[c]
 
-            if score < best_score:
-                best_score = score
-                best_engineer = e
+    # fallback assignment if any left
+    for c in clusters:
+        if c not in cluster_to_engineer:
+            cluster_to_engineer[c] = min(engineer_load, key=engineer_load.get)
+            engineer_load[cluster_to_engineer[c]] += cluster_sizes[c]
 
-        # fallback (if all full)
-        if best_engineer is None:
-            best_engineer = min(counts, key=counts.get)
+    df["Engineer"] = df["Cluster"].map(cluster_to_engineer)
 
-        df.at[i, "Engineer"] = best_engineer
-        counts[best_engineer] += 1
-
-    st.success("Routing complete (max 5 enforced)!")
+    st.success("Tight geographic clustering complete")
 
     # =========================================================
     # 📦 OUTPUT
