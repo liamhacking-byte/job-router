@@ -4,13 +4,13 @@ import numpy as np
 import requests
 from urllib.parse import quote
 
-st.title("Smart Job Router (Geo-Optimised)")
+st.title("Smart Job Router (Stable Balanced Geo Dispatch)")
 
 uploaded_file = st.file_uploader("Upload Jobs Excel")
 engineers = st.number_input("Number of engineers", min_value=1, value=4)
 
 
-# ---------------- POSTCODE EXTRACTION ----------------
+# ---------------- POSTCODE ----------------
 def extract_postcode(text):
     if pd.isna(text):
         return None
@@ -55,7 +55,6 @@ def order_route(df):
     remaining = remaining.drop(current.name)
 
     while len(remaining) > 0:
-
         cp = (current["lat"], current["lon"])
 
         remaining["d"] = remaining.apply(
@@ -90,7 +89,7 @@ if uploaded_file:
         st.error("No address column found")
         st.stop()
 
-    st.write("Using column:", address_col)
+    st.write("Using:", address_col)
 
     # ---------------- POSTCODES ----------------
     df["postcode"] = df[address_col].apply(extract_postcode)
@@ -111,12 +110,18 @@ if uploaded_file:
     st.success(f"Valid jobs: {len(df)}")
 
     # =========================================================
-    # 🧭 GEO-FIRST BALANCED ASSIGNMENT (NO AM/PM LOGIC)
+    # 🧠 FIXED BALANCED ASSIGNMENT (NO STARVATION)
     # =========================================================
 
     df["Engineer"] = -1
+
+    capacity = int(np.ceil(len(df) / engineers))
     counts = {i: 0 for i in range(engineers)}
-    target = len(df) / engineers
+
+    # initial geographic anchors
+    seed_idx = np.linspace(0, len(df)-1, engineers, dtype=int)
+    seeds = df.iloc[seed_idx]
+    centers = list(zip(seeds["lat"], seeds["lon"]))
 
     for i, row in df.iterrows():
 
@@ -127,17 +132,14 @@ if uploaded_file:
 
         for e in range(engineers):
 
-            eng_jobs = df[df["Engineer"] == e]
+            # 🚫 HARD CAPACITY RULE (this fixes your issue)
+            if counts[e] >= capacity:
+                continue
 
-            if len(eng_jobs) == 0:
-                centroid = point
-            else:
-                centroid = (eng_jobs["lat"].mean(), eng_jobs["lon"].mean())
+            geo = dist(point, centers[e])
 
-            geo = dist(point, centroid)
-
-            # light balancing only
-            load_penalty = abs(counts[e] - target) * 0.2
+            # mild load penalty
+            load_penalty = counts[e] * 0.3
 
             score = geo + load_penalty
 
@@ -145,13 +147,17 @@ if uploaded_file:
                 best_score = score
                 best_engineer = e
 
+        # fallback (if all full)
+        if best_engineer is None:
+            best_engineer = min(counts, key=counts.get)
+
         df.at[i, "Engineer"] = best_engineer
         counts[best_engineer] += 1
 
-    st.success("Routing complete!")
+    st.success("Balanced routing complete!")
 
     # =========================================================
-    # 📦 OUTPUT (AM/PM DISPLAY ONLY)
+    # 📦 OUTPUT
     # =========================================================
 
     for e in range(engineers):
@@ -163,11 +169,8 @@ if uploaded_file:
         eng_df = order_route(eng_df)
 
         cols = [address_col, "postcode"]
-
-        # AM/PM is ONLY shown, not used in routing
         if "Slot" in eng_df.columns:
             cols.append("Slot")
-
         cols += ["lat", "lon"]
 
         st.dataframe(eng_df[cols])
