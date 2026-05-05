@@ -2,14 +2,13 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import requests
-from sklearn.cluster import KMeans
 from urllib.parse import quote
 
-st.title("Smart Job Router (Stable Geo Clustering)")
+st.title("Smart Job Router (Stable Version)")
 
 uploaded_file = st.file_uploader("Upload Jobs Excel")
 
-engineers = st.number_input("Number of engineers", min_value=1, value=4)
+ENGINEERS = st.number_input("Engineers", min_value=1, value=4)
 MAX_JOBS = 5
 
 
@@ -17,8 +16,7 @@ MAX_JOBS = 5
 def extract_postcode(text):
     if pd.isna(text):
         return None
-    parts = str(text).split(",")
-    return parts[-1].strip().upper()
+    return str(text).split(",")[-1].strip().upper()
 
 
 # ---------------- GEOCODE ----------------
@@ -31,6 +29,11 @@ def geocode(pc):
         return r["result"]["latitude"], r["result"]["longitude"]
     except:
         return None, None
+
+
+# ---------------- DISTANCE ----------------
+def dist(a, b):
+    return (a[0]-b[0])**2 + (a[1]-b[1])**2
 
 
 # ---------------- ROUTE ORDER ----------------
@@ -49,7 +52,7 @@ def route(df):
         cp = (current["lat"], current["lon"])
 
         remaining["d"] = remaining.apply(
-            lambda r: (r["lat"] - cp[0])**2 + (r["lon"] - cp[1])**2,
+            lambda r: dist(cp, (r["lat"], r["lon"])),
             axis=1
         )
 
@@ -62,7 +65,7 @@ def route(df):
 
 
 # ---------------- MAP ----------------
-def maps(addrs):
+def map_link(addrs):
     return "https://www.google.com/maps/dir/" + "/".join([quote(str(a)) for a in addrs])
 
 
@@ -72,14 +75,19 @@ if uploaded_file:
     df = pd.read_excel(uploaded_file)
     df.columns = df.columns.str.strip()
 
-    address_col = [c for c in df.columns if "address" in c.lower()][0]
+    address_col = next((c for c in df.columns if "address" in c.lower()), None)
 
+    if not address_col:
+        st.error("No address column found")
+        st.stop()
+
+    # ---------------- POSTCODES ----------------
     df["postcode"] = df[address_col].apply(extract_postcode)
 
     lat, lon = [], []
 
-    for p in df["postcode"]:
-        la, lo = geocode(p)
+    for pc in df["postcode"]:
+        la, lo = geocode(pc)
         lat.append(la)
         lon.append(lo)
 
@@ -91,36 +99,42 @@ if uploaded_file:
     st.write(f"Valid jobs: {len(df)}")
 
     # =====================================================
-    # 🧭 STEP 1: GEO CLUSTERING (CLEAN & STABLE)
+    # 🧠 CORE LOGIC: NEAREST ENGINEER + CAPACITY LIMIT
     # =====================================================
 
-    n_clusters = engineers * MAX_JOBS
+    df["Engineer"] = -1
+    counts = {i: 0 for i in range(ENGINEERS)}
 
-    kmeans = KMeans(n_clusters=n_clusters, random_state=42, n_init="auto")
-    df["cluster"] = kmeans.fit_predict(df[["lat", "lon"]])
+    # seed engineers with first points (spread start)
+    seeds = df.sample(min(ENGINEERS, len(df)), random_state=1)
+    centers = list(zip(seeds["lat"], seeds["lon"]))
 
-    # =====================================================
-    # 🧠 STEP 2: ASSIGN CLUSTERS EVENLY
-    # =====================================================
+    if len(centers) < ENGINEERS:
+        centers += centers[:ENGINEERS - len(centers)]
 
-    cluster_sizes = df["cluster"].value_counts().sort_values(ascending=False)
+    for i, row in df.iterrows():
 
-    engineer_load = {i: 0 for i in range(engineers)}
-    cluster_map = {}
+        point = (row["lat"], row["lon"])
 
-    for c, size in cluster_sizes.items():
+        best = None
+        best_score = 1e9
 
-        best = min(engineer_load, key=engineer_load.get)
+        for e in range(ENGINEERS):
 
-        if engineer_load[best] + size <= MAX_JOBS:
-            cluster_map[c] = best
-            engineer_load[best] += size
-        else:
-            # force assign if needed
-            cluster_map[c] = best
-            engineer_load[best] += min(size, MAX_JOBS)
+            if counts[e] >= MAX_JOBS:
+                continue
 
-    df["Engineer"] = df["cluster"].map(cluster_map)
+            score = dist(point, centers[e]) + counts[e] * 0.1
+
+            if score < best_score:
+                best_score = score
+                best = e
+
+        if best is None:
+            best = min(counts, key=counts.get)
+
+        df.at[i, "Engineer"] = best
+        counts[best] += 1
 
     st.success("Routing complete")
 
@@ -128,7 +142,7 @@ if uploaded_file:
     # OUTPUT
     # =====================================================
 
-    for e in range(engineers):
+    for e in range(ENGINEERS):
 
         eng = df[df["Engineer"] == e].copy()
 
@@ -145,7 +159,5 @@ if uploaded_file:
 
         if len(eng) > 0:
             st.markdown(
-                f"[Open Route](https://www.google.com/maps/dir/" +
-                "/".join([quote(str(x)) for x in eng[address_col]]) +
-                ")"
+                f"[Open Route]({map_link(eng[address_col].tolist())})"
             )
