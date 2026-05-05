@@ -3,12 +3,10 @@ import pandas as pd
 import numpy as np
 import requests
 from urllib.parse import quote
+from sklearn.cluster import KMeans
 from math import radians, sin, cos, sqrt, atan2
 
-from ortools.constraint_solver import pywrapcp
-from ortools.constraint_solver import routing_enums_pb2
-
-st.title("Smart Job Router (Fast Optimised Dispatch Engine)")
+st.title("Smart Job Router (Fast Geographic Dispatcher)")
 
 uploaded_file = st.file_uploader("Upload Jobs Excel")
 engineers = st.number_input("Number of engineers", min_value=1, value=4)
@@ -16,10 +14,9 @@ engineers = st.number_input("Number of engineers", min_value=1, value=4)
 # ---------------- SETTINGS ----------------
 MAX_JOBS = 5
 MIN_JOBS = 4
-MAX_NODES = 120  # performance cap
 
 
-# ---------------- POSTCODE ----------------
+# ---------------- POSTCODE EXTRACTION ----------------
 def extract_postcode(text):
     if pd.isna(text):
         return None
@@ -50,6 +47,7 @@ def geocode_postcode(postcode):
 # ---------------- DISTANCE ----------------
 def distance(a, b):
     R = 6371
+
     lat1, lon1 = map(radians, a)
     lat2, lon2 = map(radians, b)
 
@@ -60,7 +58,7 @@ def distance(a, b):
     return 2 * R * atan2(sqrt(h), sqrt(1 - h))
 
 
-# ---------------- MAPS ----------------
+# ---------------- GOOGLE MAPS ----------------
 def maps_link(addresses):
     clean = [str(a).strip() for a in addresses if pd.notna(a)]
 
@@ -74,92 +72,7 @@ def maps_link(addresses):
     )
 
 
-# ---------------- DISTANCE MATRIX (CACHED) ----------------
-@st.cache_data
-def build_matrix(coords):
-    n = len(coords)
-
-    matrix = []
-    for i in range(n):
-        row = []
-        for j in range(n):
-            row.append(int(distance(coords[i], coords[j]) * 1000))
-        matrix.append(row)
-
-    return matrix
-
-
-# ---------------- OR-TOOLS SOLVER ----------------
-def solve_vrp(distance_matrix, num_vehicles, demands, capacities):
-
-    manager = pywrapcp.RoutingIndexManager(
-        len(distance_matrix),
-        num_vehicles,
-        0
-    )
-
-    routing = pywrapcp.RoutingModel(manager)
-
-    # distance callback
-    def dist_cb(from_index, to_index):
-        return distance_matrix[
-            manager.IndexToNode(from_index)
-        ][
-            manager.IndexToNode(to_index)
-        ]
-
-    transit_cb = routing.RegisterTransitCallback(dist_cb)
-    routing.SetArcCostEvaluatorOfAllVehicles(transit_cb)
-
-    # demand callback
-    def demand_cb(from_index):
-        return demands[manager.IndexToNode(from_index)]
-
-    demand_cb_idx = routing.RegisterUnaryTransitCallback(demand_cb)
-
-    routing.AddDimensionWithVehicleCapacity(
-        demand_cb_idx,
-        0,
-        capacities,
-        True,
-        "Capacity"
-    )
-
-    # ⚡ FAST SOLVER SETTINGS (IMPORTANT FIX)
-    search_params = pywrapcp.DefaultRoutingSearchParameters()
-    search_params.first_solution_strategy = (
-        routing_enums_pb2.FirstSolutionStrategy.PATH_CHEAPEST_ARC
-    )
-
-    search_params.local_search_metaheuristic = (
-        routing_enums_pb2.LocalSearchMetaheuristic.GUIDED_LOCAL_SEARCH
-    )
-
-    search_params.time_limit.FromSeconds(3)
-
-    solution = routing.SolveWithParameters(search_params)
-
-    if not solution:
-        return None
-
-    routes = []
-
-    for v in range(num_vehicles):
-
-        index = routing.Start(v)
-        route = []
-
-        while not routing.IsEnd(index):
-
-            route.append(manager.IndexToNode(index))
-            index = solution.Value(routing.NextVar(index))
-
-        routes.append(route)
-
-    return routes
-
-
-# ---------------- MAIN ----------------
+# ---------------- MAIN APP ----------------
 if uploaded_file:
 
     df = pd.read_excel(uploaded_file)
@@ -173,18 +86,13 @@ if uploaded_file:
 
     st.write("Using column:", address_col)
 
-    # ---------------- LIMIT DATA FOR SPEED ----------------
-    if len(df) > MAX_NODES:
-        st.warning(f"Large dataset detected. Limiting to {MAX_NODES} jobs for performance.")
-        df = df.sample(MAX_NODES, random_state=42)
-
     # ---------------- POSTCODES ----------------
     df["postcode"] = df[address_col].apply(extract_postcode)
 
-    # ---------------- GEOCODE ----------------
-    unique_pcs = df["postcode"].dropna().unique()
+    # ---------------- GEOCODING ----------------
+    unique_postcodes = df["postcode"].dropna().unique()
 
-    cache = {pc: geocode_postcode(pc) for pc in unique_pcs}
+    cache = {pc: geocode_postcode(pc) for pc in unique_postcodes}
 
     df["lat"] = df["postcode"].map(lambda x: cache.get(x, (None, None))[0])
     df["lon"] = df["postcode"].map(lambda x: cache.get(x, (None, None))[1])
@@ -197,44 +105,94 @@ if uploaded_file:
 
     st.success(f"Valid jobs: {len(df)}")
 
-    # ---------------- PREP DATA ----------------
-    coords = list(zip(df["lat"], df["lon"]))
+    # ======================================================
+    # 🧠 IMPROVED FAST CLUSTERING (KEY FIX)
+    # ======================================================
 
-    distance_matrix = build_matrix(coords)
+    coords = df[["lat", "lon"]].values
 
-    demands = [1] * len(df)
+    n_clusters = min(engineers, len(df))
 
-    capacities = [MAX_JOBS] * engineers
+    kmeans = KMeans(
+        n_clusters=n_clusters,
+        random_state=42,
+        n_init=10
+    )
 
-    # safety check
-    if len(df) > engineers * MAX_JOBS:
-        st.error("Too many jobs for available engineers (max 5 each).")
-        st.stop()
+    df["Engineer"] = kmeans.fit_predict(coords)
 
-    # ---------------- SOLVE ----------------
-    with st.spinner("Optimising routes..."):
-        routes = solve_vrp(
-            distance_matrix,
-            engineers,
-            demands,
-            capacities
-        )
+    centroids = kmeans.cluster_centers_
 
-    if not routes:
-        st.error("No solution found")
-        st.stop()
+    # ======================================================
+    # ⚖️ FIX: BALANCE + PREVENT FAR OUTLIERS
+    # ======================================================
+
+    def cluster_size(e):
+        return len(df[df["Engineer"] == e])
+
+    def assign_best_cluster(row):
+        point = (row["lat"], row["lon"])
+
+        scores = []
+
+        for i in range(n_clusters):
+
+            center = centroids[i]
+
+            # distance to centroid
+            d = distance(point, (center[0], center[1]))
+
+            # penalty for overcrowded clusters
+            size_penalty = cluster_size(i) * 0.15
+
+            scores.append((i, d + size_penalty))
+
+        return min(scores, key=lambda x: x[1])[0]
+
+    df["Engineer"] = df.apply(assign_best_cluster, axis=1)
+
+    # ======================================================
+    # ⚖️ HARD CAPACITY ENFORCEMENT (4–5 JOBS)
+    # ======================================================
+
+    for e in range(n_clusters):
+
+        cluster = df[df["Engineer"] == e]
+
+        if len(cluster) > MAX_JOBS:
+
+            overflow = cluster.iloc[MAX_JOBS:]
+
+            for idx in overflow.index:
+
+                point = (df.loc[idx, "lat"], df.loc[idx, "lon"])
+
+                candidates = []
+
+                for j in range(n_clusters):
+
+                    if cluster_size(j) < MAX_JOBS:
+
+                        center = centroids[j]
+                        d = distance(point, (center[0], center[1]))
+
+                        candidates.append((j, d))
+
+                if candidates:
+                    new_cluster = min(candidates, key=lambda x: x[1])[0]
+                    df.at[idx, "Engineer"] = new_cluster
 
     st.success("Routing complete!")
 
-    # ---------------- OUTPUT ----------------
-    for i, route in enumerate(routes):
+    # ======================================================
+    # 📦 OUTPUT
+    # ======================================================
+
+    for i in sorted(df["Engineer"].unique()):
+
+        eng_df = df[df["Engineer"] == i].copy()
 
         st.subheader(f"Engineer {i + 1}")
-
-        if len(route) <= 1:
-            continue
-
-        eng_df = df.iloc[route]
 
         st.dataframe(
             eng_df[[address_col, "postcode", "lat", "lon"]]
