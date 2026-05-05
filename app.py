@@ -2,16 +2,15 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import requests
-from sklearn.cluster import KMeans
 from urllib.parse import quote
 
-st.title("Smart Job Router (Geo-Optimised Dispatch)")
+st.title("Smart Job Router (Balanced Geographic Dispatch)")
 
 uploaded_file = st.file_uploader("Upload Jobs Excel")
 engineers = st.number_input("Number of engineers", min_value=1, value=4)
 
 
-# ---------------- POSTCODE EXTRACTION ----------------
+# ---------------- POSTCODE ----------------
 def extract_postcode(text):
     if pd.isna(text):
         return None
@@ -19,7 +18,7 @@ def extract_postcode(text):
     return parts[-1].upper() if parts else None
 
 
-# ---------------- GEOCODING ----------------
+# ---------------- GEOCODE ----------------
 def geocode_postcode(pc):
     if not pc:
         return None, None
@@ -38,7 +37,12 @@ def geocode_postcode(pc):
         return None, None
 
 
-# ---------------- ROUTE ORDER (NEAREST NEIGHBOUR) ----------------
+# ---------------- DISTANCE ----------------
+def dist(a, b):
+    return (a[0] - b[0])**2 + (a[1] - b[1])**2
+
+
+# ---------------- ROUTE ORDER ----------------
 def order_route(df):
     if len(df) <= 1:
         return df
@@ -51,25 +55,25 @@ def order_route(df):
     remaining = remaining.drop(current.name)
 
     while len(remaining) > 0:
-        current_point = (current["lat"], current["lon"])
+        cp = (current["lat"], current["lon"])
 
-        remaining["dist"] = remaining.apply(
-            lambda r: (r["lat"] - current_point[0])**2 + (r["lon"] - current_point[1])**2,
+        remaining["d"] = remaining.apply(
+            lambda r: dist(cp, (r["lat"], r["lon"])),
             axis=1
         )
 
-        nxt = remaining["dist"].idxmin()
+        nxt = remaining["d"].idxmin()
         current = remaining.loc[nxt]
 
         route.append(current)
         remaining = remaining.drop(nxt)
 
-    return pd.DataFrame(route).drop(columns=["dist"], errors="ignore")
+    return pd.DataFrame(route).drop(columns=["d"], errors="ignore")
 
 
-# ---------------- MAP LINK ----------------
-def maps_link(addresses):
-    clean = [str(a) for a in addresses if pd.notna(a)]
+# ---------------- MAP ----------------
+def maps_link(addrs):
+    clean = [str(a) for a in addrs if pd.notna(a)]
     return "https://www.google.com/maps/dir/" + "/".join([quote(a) for a in clean])
 
 
@@ -82,12 +86,12 @@ if uploaded_file:
     address_col = next((c for c in df.columns if "address" in c.lower()), None)
 
     if not address_col:
-        st.error(f"No address column found. Columns: {list(df.columns)}")
+        st.error("No address column found")
         st.stop()
 
-    st.write("Using column:", address_col)
+    st.write("Using:", address_col)
 
-    # ---------------- EXTRACT POSTCODES ----------------
+    # ---------------- POSTCODES ----------------
     df["postcode"] = df[address_col].apply(extract_postcode)
 
     # ---------------- GEOCODE ----------------
@@ -103,21 +107,47 @@ if uploaded_file:
 
     df = df.dropna(subset=["lat", "lon"]).reset_index(drop=True)
 
-    if len(df) == 0:
-        st.error("No valid geocoded jobs.")
-        st.stop()
-
-    st.success(f"Valid jobs: {len(df)}")
+    st.write(f"Valid jobs: {len(df)}")
 
     # =========================================================
-    # 🧭 GEOGRAPHIC CLUSTERING (KEY FIX)
+    # 🧠 BALANCED GEO ASSIGNMENT (FIXES 9 vs 2 ISSUE)
     # =========================================================
 
-    kmeans = KMeans(n_clusters=engineers, random_state=42, n_init="auto")
-    df["Engineer"] = kmeans.fit_predict(df[["lat", "lon"]])
+    df["Engineer"] = -1
+    engineer_counts = {i: 0 for i in range(engineers)}
+
+    # initial "centres"
+    seed_idx = np.linspace(0, len(df)-1, engineers, dtype=int)
+    seeds = df.iloc[seed_idx]
+    centers = list(zip(seeds["lat"], seeds["lon"]))
+
+    for i, row in df.iterrows():
+
+        point = (row["lat"], row["lon"])
+
+        best_engineer = None
+        best_score = float("inf")
+
+        for e in range(engineers):
+
+            geo = dist(point, centers[e])
+
+            # 🔥 key fix: penalty for overloaded engineers
+            load_penalty = engineer_counts[e] * 0.8
+
+            score = geo + load_penalty
+
+            if score < best_score:
+                best_score = score
+                best_engineer = e
+
+        df.at[i, "Engineer"] = best_engineer
+        engineer_counts[best_engineer] += 1
+
+    st.success("Balanced routing complete!")
 
     # =========================================================
-    # 📦 OUTPUT
+    # OUTPUT
     # =========================================================
 
     for e in range(engineers):
@@ -126,10 +156,8 @@ if uploaded_file:
 
         st.subheader(f"Engineer {e+1}")
 
-        # route optimised per engineer
         eng_df = order_route(eng_df)
 
-        # show everything clearly including AM/PM
         cols = [address_col, "postcode"]
         if "Slot" in eng_df.columns:
             cols.append("Slot")
