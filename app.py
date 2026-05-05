@@ -2,9 +2,10 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import requests
+from sklearn.cluster import KMeans
 from urllib.parse import quote
 
-st.title("Smart Job Router (Stable Balanced Geo Dispatch)")
+st.title("Smart Job Router (True Geographic Clustering)")
 
 uploaded_file = st.file_uploader("Upload Jobs Excel")
 engineers = st.number_input("Number of engineers", min_value=1, value=4)
@@ -37,11 +38,6 @@ def geocode_postcode(pc):
         return None, None
 
 
-# ---------------- DISTANCE ----------------
-def dist(a, b):
-    return (a[0] - b[0])**2 + (a[1] - b[1])**2
-
-
 # ---------------- ROUTE ORDER ----------------
 def order_route(df):
     if len(df) <= 1:
@@ -55,10 +51,11 @@ def order_route(df):
     remaining = remaining.drop(current.name)
 
     while len(remaining) > 0:
+
         cp = (current["lat"], current["lon"])
 
         remaining["d"] = remaining.apply(
-            lambda r: dist(cp, (r["lat"], r["lon"])),
+            lambda r: (r["lat"] - cp[0])**2 + (r["lon"] - cp[1])**2,
             axis=1
         )
 
@@ -110,51 +107,22 @@ if uploaded_file:
     st.success(f"Valid jobs: {len(df)}")
 
     # =========================================================
-    # 🧠 FIXED BALANCED ASSIGNMENT (NO STARVATION)
+    # 🧭 TRUE GEOGRAPHIC CLUSTERING (THIS FIXES YOUR ISSUE)
     # =========================================================
 
-    df["Engineer"] = -1
+    kmeans = KMeans(n_clusters=engineers, random_state=42, n_init="auto")
+    df["Cluster"] = kmeans.fit_predict(df[["lat", "lon"]])
 
-    capacity = int(np.ceil(len(df) / engineers))
-    counts = {i: 0 for i in range(engineers)}
+    # assign clusters to engineers
+    cluster_ids = df["Cluster"].unique()
 
-    # initial geographic anchors
-    seed_idx = np.linspace(0, len(df)-1, engineers, dtype=int)
-    seeds = df.iloc[seed_idx]
-    centers = list(zip(seeds["lat"], seeds["lon"]))
+    cluster_to_engineer = {
+        c: i % engineers for i, c in enumerate(cluster_ids)
+    }
 
-    for i, row in df.iterrows():
+    df["Engineer"] = df["Cluster"].map(cluster_to_engineer)
 
-        point = (row["lat"], row["lon"])
-
-        best_engineer = None
-        best_score = float("inf")
-
-        for e in range(engineers):
-
-            # 🚫 HARD CAPACITY RULE (this fixes your issue)
-            if counts[e] >= capacity:
-                continue
-
-            geo = dist(point, centers[e])
-
-            # mild load penalty
-            load_penalty = counts[e] * 0.3
-
-            score = geo + load_penalty
-
-            if score < best_score:
-                best_score = score
-                best_engineer = e
-
-        # fallback (if all full)
-        if best_engineer is None:
-            best_engineer = min(counts, key=counts.get)
-
-        df.at[i, "Engineer"] = best_engineer
-        counts[best_engineer] += 1
-
-    st.success("Balanced routing complete!")
+    st.success("Clusters assigned to engineers")
 
     # =========================================================
     # 📦 OUTPUT
